@@ -50,13 +50,19 @@ def find_duplicates(src_list: str, dup_list: str):
     list_one: list[dict] = build_file_list(Path(src_list))
     list_two: list[dict] = build_file_list(Path(dup_list))
     duplicates: dict = {k.get('hash'): {'file': k.get('file'), 'duplicate': []} for k in list_one}
-    # print(json.dumps(duplicates, indent=2, default=str))
 
+    for dup in tqdm(list_two, desc="Looking for duplicates"):
+        if dup.get('hash') in duplicates.keys():
+            t: Path = dup.get('file')
+            duplicates[dup.get('hash')]['duplicate'].append(t.absolute())
+
+    """
     for file in tqdm(list_one, desc="Looking for duplicates"):
         for dup in list_two:
             if file.get('hash') == dup.get('hash'):
                 t: Path = dup.get('file')
                 duplicates[file.get('hash')]['duplicate'].append(t.absolute())
+    """
 
     return duplicates
 
