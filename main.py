@@ -39,7 +39,7 @@ def get_hash(file_obj: Path) -> str:
     return h
 
 
-def read_dir(source_dir: Path, recursive: bool) -> list[Path]:
+def read_dir(source_dir: Path, recursive: bool = False) -> list[Path]:
     """
     Read everything in a directory.
 
@@ -130,7 +130,7 @@ def build_file_list(src_dir: str | Path, recursive: bool, images: bool) -> list[
 
 
 def find_duplicates(
-        src_list: str, target_list: str, recursive: bool, remove_zero: bool, images: bool, delete: bool
+        src_list: str, target_list: str, recursive: bool, images: bool, delete: bool
 ) -> dict:
     """
     Find duplicates of files in `src_list` in `dup_list`.
@@ -140,8 +140,6 @@ def find_duplicates(
     :param target_list: Directory to search for duplicates
     :type: :class:`str`
     :param recursive: Recurse into subdirectories
-    :param remove_zero: Remove items from results without duplicates
-    :type remove_zero: :class:`bool`
     :param images: Only search for image files
     :type images: :class:`bool`
     :param delete: Delete duplicates
@@ -174,23 +172,22 @@ def find_duplicates(
                 {"path": duplicate_file.absolute(), "size": duplicate_file.stat().st_size}
             )
 
-    if remove_zero:
-        no_dups = []
+    no_dups = []
 
-        for k, v in duplicates.items():
-            if len(v.get("duplicates")) == 0:
-                no_dups.append(k)
+    for k, v in duplicates.items():
+        if len(v.get("duplicates")) == 0:
+            no_dups.append(k)
 
-        if len(no_dups) == 0:
-            return duplicates
+    if len(no_dups) == 0:
+        return duplicates
 
-        for x in tqdm(
-                no_dups,
-                colour="green",
-                desc="Removing items with no matches",
-                total=len(no_dups),
-        ):
-            duplicates.pop(x)
+    for x in tqdm(
+            no_dups,
+            colour="green",
+            desc="Removing items with no matches",
+            total=len(no_dups),
+    ):
+        duplicates.pop(x)
 
     if delete:
         to_delete = []
@@ -282,7 +279,6 @@ if __name__ == "__main__":
         src_list=args.source,
         target_list=args.target,
         recursive=args.recursive,
-        remove_zero=args.reduce,
         images=args.images,
         delete=args.delete
     )
