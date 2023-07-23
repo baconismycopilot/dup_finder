@@ -88,12 +88,15 @@ def is_image(f: Path) -> bool:
     return True
 
 
-def do_big_task(func_name: Callable, func_args):
+def do_big_task(func_name: Callable, func_args: list):
     """Use half of available CPUs to perform this task."""
 
     cpus = int(cpu_count() / 2)
+
     with Pool(cpus) as pool:
         res = pool.map(func_name, func_args)
+
+    pool.join()
 
     return res
 
@@ -137,6 +140,7 @@ def build_file_list(src_dir: str | Path, recursive: bool, images: bool) -> list[
 
     if args.multithread:
         res = do_big_task(get_hash, [to_hash])
+
         return res[0]
 
     return file_list
@@ -211,12 +215,12 @@ def pretty_dump(data: list | list[dict] | dict):
 def print_summary(data: list | list[dict] | dict):
     duplicate_counter = 0
     total_dup_size = 0
-    for file_hash, file_details in dups.items():
+    for file_hash, file_details in duplicates.items():
         duplicate_counter += len(file_details["duplicate"])
         total_dup_size += file_details["size"]
 
     if args.print:
-        pretty_dump(dups)
+        pretty_dump(duplicates)
 
     print(f"{len(data)} {'file' if len(data) < 2 else 'files'}, {duplicate_counter} duplicates (--print for details)")
     print(f"Size of all duplicates: {convert_size(total_dup_size).mb} MB")
@@ -272,16 +276,11 @@ def parse_arguments():
 if __name__ == "__main__":
     args = parse_arguments()
 
-    dups = find_duplicates(
+    duplicates = find_duplicates(
         src_list=args.source,
         target_list=args.target,
         recursive=args.recursive,
         images=args.images,
     )
 
-    dc = 0
-    for file, result in dups.items():
-        if len(result["duplicate"]) > 0:
-            dc += len(result["duplicate"])
-
-    print_summary(data=dups)
+    print_summary(data=duplicates)
