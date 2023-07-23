@@ -1,8 +1,9 @@
 import argparse
 import json
 from hashlib import sha1
-from multiprocessing import Pool
+from multiprocessing import Pool, cpu_count
 from pathlib import Path
+from typing import Callable
 
 from tqdm import tqdm
 
@@ -17,7 +18,7 @@ def get_hash(file_obj: list[Path]) -> list[dict]:
     :type file_obj: :class:`Path`
 
     :return: SHA1 hash
-    :rtype: :class:`str`
+    :rtype: :class:`list[dict]`
     """
 
     results = []
@@ -26,10 +27,14 @@ def get_hash(file_obj: list[Path]) -> list[dict]:
         if not f.is_file():
             pass
 
-        b = f.read_bytes()
-        h = sha1(b).hexdigest()
+        with open(f, 'rb') as fb:
+            if args.quick:
+                b = fb.read(4096)
+            else:
+                b = fb.read()
 
-        del b
+            h = sha1(b).hexdigest()
+
         results.append({"file": f, "hash": h})
 
     return results
@@ -74,6 +79,16 @@ def is_image(f: Path) -> bool:
     return True
 
 
+def do_big_task(func_name: Callable, func_args):
+    """Use half of available CPUs to perform this task."""
+
+    cpus = int(cpu_count() / 2)
+    with Pool(cpus) as pool:
+        res = pool.map(func_name, func_args)
+
+    return res
+
+
 def build_file_list(src_dir: str | Path, recursive: bool, images: bool) -> list[dict]:
     """
     Build a list of files for a given directory.
@@ -90,26 +105,32 @@ def build_file_list(src_dir: str | Path, recursive: bool, images: bool) -> list[
     """
 
     to_hash = []
+    file_list = []
     dir_files = read_dir(src_dir, recursive=recursive)
-    pool = Pool()
-    pbar = tqdm(enumerate(dir_files), colour="#d3d3d3", total=len(dir_files))
 
-    for idx, obj in pbar:
-        if obj.is_dir():
-            continue
-        if not images:
-            pbar.set_description(f"Reading: {src_dir}")
-            to_hash.append(obj)
-        else:
-            if obj.is_file() and is_image(obj):
-                pbar.set_description(f"Reading {src_dir}")
-                to_hash.append(obj)
+    with tqdm(enumerate(dir_files), colour="#d3d3d3", total=len(dir_files)) as pb:
+        for idx, obj in pb:
+            if obj.is_dir():
+                continue
+            if images:
+                if obj.is_file() and is_image(obj):
+                    pb.set_description(f"Reading: {src_dir}")
+                    if args.multithread:
+                        to_hash.append(obj)
+                    else:
+                        file_list.append(get_hash([obj])[0])
+            else:
+                pb.set_description(f"Reading {src_dir}")
+                if args.multithread:
+                    to_hash.append(obj)
+                else:
+                    file_list.append(get_hash([obj])[0])
 
-    res = pool.map(get_hash, [to_hash])
-    pool.close()
-    pbar.close()
+    if args.multithread:
+        res = do_big_task(get_hash, [to_hash])
+        return res[0]
 
-    return res[0]
+    return file_list
 
 
 def find_duplicates(
@@ -168,7 +189,7 @@ def pretty_dump(data: list | list[dict] | dict):
 
 
 def print_summary(data: list | list[dict] | dict, dup_count: int):
-    print(f"{len(data)} {'file' if len(data) < 2 else 'files'}, {dup_count} duplicates")
+    print(f"{len(data)} {'file' if len(data) < 2 else 'files'}, {dup_count} duplicates (--print for details)")
 
 
 def parse_arguments():
@@ -194,11 +215,23 @@ def parse_arguments():
         action="store_true",
     )
     parser.add_argument(
+        "-q", "--quick",
+        help="Read a small portion of files, faster but potentially less accurate",
+        default=False,
+        action="store_true"
+    )
+    parser.add_argument(
         "-i", "--images", help="Only search for image files", default=False, action="store_true"
     )
     parser.add_argument(
+        "-m", "--multithread",
+        help="Use multiprocessing for large batches, defaults to half of available cores",
+        default=False,
+        action="store_true"
+    )
+    parser.add_argument(
         "-p", "--print",
-        help="Print results to stdout, defaults is summary output",
+        help="Print results to stdout",
         default=False,
         action="store_true",
     )
