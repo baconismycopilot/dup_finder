@@ -12,7 +12,7 @@ FILE_TYPES = ["bmp", "jpg", "jpeg", "png", "gif", "pdf", "svg"]
 
 def get_hash(file_obj: list[Path]) -> list[dict]:
     """
-    Read a file and generate a hash.
+    Read a file bytes and generate a hash.
 
     :param file_obj: Path object
     :type file_obj: :class:`Path`
@@ -133,15 +133,27 @@ def build_file_list(src_dir: str | Path, recursive: bool, images: bool) -> list[
     return file_list
 
 
+def clean_results(source_list: dict) -> dict:
+    """Remove items where no duplicates were found."""
+
+    original = source_list.copy()
+
+    for k, v in tqdm(original.items(), colour="green", desc="Cleaning up results", total=len(original)):
+        if len(v.get("duplicate")) == 0:
+            source_list.pop(k)
+
+    return source_list
+
+
 def find_duplicates(
-        src_list: str, dup_list: str, recursive: bool, images: bool
+        src_list: str, target_list: str, recursive: bool, images: bool
 ) -> dict:
     """
-    Find duplicates of files in `src_list` in `dup_list`.
+    Find duplicates of files from `src_list` in `dup_list`.
 
     :param src_list: Directory of originals
     :type src_list: :class:`str`
-    :param dup_list: Directory to search for duplicates
+    :param target_list: Directory to search for duplicates
     :type: :class:`str`
     :param recursive: Recurse into subdirectories
     :param images: Only search for image files
@@ -155,7 +167,7 @@ def find_duplicates(
         Path(src_list), recursive=recursive, images=images
     )
     list_two: list[dict] = build_file_list(
-        Path(dup_list), recursive=recursive, images=images
+        Path(target_list), recursive=recursive, images=images
     )
 
     source_list: dict = {
@@ -169,19 +181,7 @@ def find_duplicates(
             t: Path = target_file.get("file")
             source_list[target_file.get("hash")]["duplicate"].append(t.absolute())
 
-    no_dups = []
-
-    for k, v in source_list.items():
-        if len(v.get("duplicate")) == 0:
-            no_dups.append(k)
-
-    if len(no_dups) == 0:
-        return source_list
-
-    for x in tqdm(no_dups, colour="green", desc="Cleaning up results.", total=len(no_dups)):
-        source_list.pop(x)
-
-    return source_list
+    return clean_results(source_list)
 
 
 def pretty_dump(data: list | list[dict] | dict):
@@ -244,7 +244,7 @@ if __name__ == "__main__":
 
     dups = find_duplicates(
         src_list=args.source,
-        dup_list=args.target,
+        target_list=args.target,
         recursive=args.recursive,
         images=args.images,
     )
