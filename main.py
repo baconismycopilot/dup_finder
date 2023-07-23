@@ -1,5 +1,7 @@
 import argparse
 import json
+import os
+from dataclasses import dataclass
 from hashlib import sha1
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
@@ -8,6 +10,13 @@ from typing import Callable
 from tqdm import tqdm
 
 FILE_TYPES = ["bmp", "jpg", "jpeg", "png", "gif", "pdf", "svg"]
+
+
+@dataclass
+class FileSize:
+    kb: int
+    mb: int
+    gb: int
 
 
 def get_hash(file_obj: list[Path]) -> list[dict]:
@@ -163,20 +172,23 @@ def find_duplicates(
     :rtype: :class:`dict`
     """
 
-    list_one: list[dict] = build_file_list(
+    source_path: list[dict] = build_file_list(
         Path(src_list), recursive=recursive, images=images
     )
-    list_two: list[dict] = build_file_list(
+    target_path: list[dict] = build_file_list(
         Path(target_list), recursive=recursive, images=images
     )
 
     source_list: dict = {
-        k.get("hash"): {"file": k.get("file"), "duplicate": []} for k in list_one
+        k.get("hash"): {
+            "file": k.get("file"),
+            "size": os.stat(k.get("file")).st_size,
+            "duplicate": []} for k in source_path
     }
 
     source_list_hashes = source_list.keys()
 
-    for target_file in tqdm(list_two, colour="yellow", desc="Identifying duplicates"):
+    for target_file in tqdm(target_path, colour="yellow", desc="Identifying duplicates"):
         if target_file.get("hash") in source_list_hashes:
             t: Path = target_file.get("file")
             source_list[target_file.get("hash")]["duplicate"].append(t.absolute())
@@ -184,12 +196,30 @@ def find_duplicates(
     return clean_results(source_list)
 
 
+def convert_size(size_in_bytes: int):
+    size_kb = size_in_bytes / 1024
+    size_mb = size_kb / 1024
+    size_gb = size_mb / 1024
+
+    return FileSize(round(size_kb), round(size_mb), round(size_gb))
+
+
 def pretty_dump(data: list | list[dict] | dict):
     print(json.dumps(data, indent=2, default=str))
 
 
-def print_summary(data: list | list[dict] | dict, dup_count: int):
-    print(f"{len(data)} {'file' if len(data) < 2 else 'files'}, {dup_count} duplicates (--print for details)")
+def print_summary(data: list | list[dict] | dict):
+    duplicate_counter = 0
+    total_dup_size = 0
+    for file_hash, file_details in dups.items():
+        duplicate_counter += len(file_details["duplicate"])
+        total_dup_size += file_details["size"]
+
+    if args.print:
+        pretty_dump(dups)
+
+    print(f"{len(data)} {'file' if len(data) < 2 else 'files'}, {duplicate_counter} duplicates (--print for details)")
+    print(f"Size of all duplicates: {convert_size(total_dup_size).mb} MB")
 
 
 def parse_arguments():
@@ -254,7 +284,4 @@ if __name__ == "__main__":
         if len(result["duplicate"]) > 0:
             dc += len(result["duplicate"])
 
-    if args.print and dc > 0:
-        pretty_dump(dups)
-
-    print_summary(data=dups, dup_count=dc)
+    print_summary(data=dups)
