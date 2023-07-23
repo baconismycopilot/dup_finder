@@ -1,14 +1,15 @@
 import argparse
 import json
 from hashlib import sha1
+from multiprocessing import Pool
 from pathlib import Path
 
 from tqdm import tqdm
 
-file_types = ["bmp", "jpg", "jpeg", "png", "gif", "pdf", "svg"]
+FILE_TYPES = ["bmp", "jpg", "jpeg", "png", "gif", "pdf", "svg"]
 
 
-def get_hash(file_obj: Path) -> str:
+def get_hash(file_obj: list[Path]) -> list[dict]:
     """
     Read a file and generate a hash.
 
@@ -19,15 +20,19 @@ def get_hash(file_obj: Path) -> str:
     :rtype: :class:`str`
     """
 
-    if not file_obj.is_file():
-        pass
+    results = []
 
-    b = file_obj.read_bytes()
-    h = sha1(b).hexdigest()
+    for f in file_obj:
+        if not f.is_file():
+            pass
 
-    del b
+        b = f.read_bytes()
+        h = sha1(b).hexdigest()
 
-    return h
+        del b
+        results.append({"file": f, "hash": h})
+
+    return results
 
 
 def read_dir(source_dir: Path, recursive: bool) -> list[Path]:
@@ -63,7 +68,7 @@ def is_image(f: Path) -> bool:
     :rtype: :class:`bool`
     """
 
-    if not f.suffix.split(".")[-1].lstrip(".").lower() in file_types:
+    if not f.suffix.split(".")[-1].lstrip(".").lower() in FILE_TYPES:
         return False
 
     return True
@@ -81,11 +86,12 @@ def build_file_list(src_dir: str | Path, recursive: bool, images: bool) -> list[
     :type images: :class:`bool`
 
     :return:
-    :rtype: :class:`list[dict`
+    :rtype: :class:`list[dict]`
     """
 
-    file_list = []
+    to_hash = []
     dir_files = read_dir(src_dir, recursive=recursive)
+    pool = Pool()
     pbar = tqdm(enumerate(dir_files), colour="#d3d3d3", total=len(dir_files))
 
     for idx, obj in pbar:
@@ -93,19 +99,21 @@ def build_file_list(src_dir: str | Path, recursive: bool, images: bool) -> list[
             continue
         if not images:
             pbar.set_description(f"Reading: {src_dir}")
-            file_list.append({"file": obj, "hash": get_hash(obj)})
+            to_hash.append(obj)
         else:
             if obj.is_file() and is_image(obj):
                 pbar.set_description(f"Reading {src_dir}")
-                file_list.append({"file": obj, "hash": get_hash(obj)})
+                to_hash.append(obj)
 
+    res = pool.map(get_hash, [to_hash])
+    pool.close()
     pbar.close()
 
-    return file_list
+    return res[0]
 
 
 def find_duplicates(
-    src_list: str, dup_list: str, recursive: bool, remove_zero: bool, images: bool
+        src_list: str, dup_list: str, recursive: bool, images: bool
 ) -> dict:
     """
     Find duplicates of files in `src_list` in `dup_list`.
@@ -115,13 +123,10 @@ def find_duplicates(
     :param dup_list: Directory to search for duplicates
     :type: :class:`str`
     :param recursive: Recurse into subdirectories
-    :param remove_zero: Remove items from results that have no
-    :type remove_zero: :class:`bool`
     :param images: Only search for image files
     :type images: :class:`bool`
 
     :return: Original ``dict`` of files with respective duplicates
-    or ``dict`` of files with only duplicates [remove_zero]
     :rtype: :class:`dict`
     """
 
@@ -131,34 +136,31 @@ def find_duplicates(
     list_two: list[dict] = build_file_list(
         Path(dup_list), recursive=recursive, images=images
     )
-    duplicates: dict = {
+
+    source_list: dict = {
         k.get("hash"): {"file": k.get("file"), "duplicate": []} for k in list_one
     }
 
-    for dup in tqdm(list_two, colour="yellow", desc="Identifying duplicates"):
-        if dup.get("hash") in duplicates.keys():
-            t: Path = dup.get("file")
-            duplicates[dup.get("hash")]["duplicate"].append(t.absolute())
+    source_list_hashes = source_list.keys()
 
-    if remove_zero:
-        no_dups = []
+    for target_file in tqdm(list_two, colour="yellow", desc="Identifying duplicates"):
+        if target_file.get("hash") in source_list_hashes:
+            t: Path = target_file.get("file")
+            source_list[target_file.get("hash")]["duplicate"].append(t.absolute())
 
-        for k, v in duplicates.items():
-            if len(v.get("duplicate")) == 0:
-                no_dups.append(k)
+    no_dups = []
 
-        if len(no_dups) == 0:
-            return duplicates
+    for k, v in source_list.items():
+        if len(v.get("duplicate")) == 0:
+            no_dups.append(k)
 
-        for x in tqdm(
-            no_dups,
-            colour="green",
-            desc="Removing items with no matches",
-            total=len(no_dups),
-        ):
-            duplicates.pop(x)
+    if len(no_dups) == 0:
+        return source_list
 
-    return duplicates
+    for x in tqdm(no_dups, colour="green", desc="Cleaning up results.", total=len(no_dups)):
+        source_list.pop(x)
+
+    return source_list
 
 
 def pretty_dump(data: list | list[dict] | dict):
@@ -169,50 +171,48 @@ def print_summary(data: list | list[dict] | dict, dup_count: int):
     print(f"{len(data)} {'file' if len(data) < 2 else 'files'}, {dup_count} duplicates")
 
 
-if __name__ == "__main__":
+def parse_arguments():
+    """Parse arguments and return the results."""
+
     parser = argparse.ArgumentParser(description="Find duplicate files")
     parser.add_argument(
-        "--source",
-        metavar="source",
+        "-s", "--source",
         type=str,
         help="Directory of original files",
         required=True,
     )
     parser.add_argument(
-        "--target",
-        metavar="target",
+        "-t", "--target",
         type=str,
         help="Directory to search",
         required=True,
     )
     parser.add_argument(
-        "--recursive",
+        "-r", "--recursive",
         help="Recurse into subdirectories",
         default=False,
         action="store_true",
     )
     parser.add_argument(
-        "--reduce",
-        help="Omit files from results with no duplicates",
-        default=False,
-        action="store_true",
+        "-i", "--images", help="Only search for image files", default=False, action="store_true"
     )
     parser.add_argument(
-        "--images", help="Search only for images", default=False, action="store_true"
-    )
-    parser.add_argument(
-        "--print",
+        "-p", "--print",
         help="Print results to stdout, defaults is summary output",
         default=False,
         action="store_true",
     )
 
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_arguments()
+
     dups = find_duplicates(
         src_list=args.source,
         dup_list=args.target,
         recursive=args.recursive,
-        remove_zero=args.reduce,
         images=args.images,
     )
 
