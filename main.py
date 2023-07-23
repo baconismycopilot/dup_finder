@@ -2,7 +2,7 @@ import argparse
 import json
 import os
 from dataclasses import dataclass
-from hashlib import sha1
+from hashlib import sha256
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 from typing import Callable
@@ -19,34 +19,29 @@ class FileSize:
     gb: int
 
 
-def get_hash(file_obj: list[Path]) -> list[dict]:
+def get_hash(file_obj: Path) -> dict:
     """
     Read a file bytes and generate a hash.
 
     :param file_obj: Path object
     :type file_obj: :class:`Path`
 
-    :return: SHA1 hash
+    :return: SHA256 hash
     :rtype: :class:`list[dict]`
     """
 
-    results = []
+    if not file_obj.is_file():
+        pass
 
-    for f in file_obj:
-        if not f.is_file():
-            pass
+    with open(file_obj, 'rb') as fb:
+        if args.quick:
+            b = fb.read(4096)
+        else:
+            b = fb.read()
 
-        with open(f, 'rb') as fb:
-            if args.quick:
-                b = fb.read(4096)
-            else:
-                b = fb.read()
+        h = sha256(b).hexdigest()
 
-            h = sha1(b).hexdigest()
-
-        results.append({"file": f, "hash": h})
-
-    return results
+    return {"file": file_obj, "hash": h}
 
 
 def read_dir(source_dir: Path, recursive: bool) -> list[Path]:
@@ -130,18 +125,18 @@ def build_file_list(src_dir: str | Path, recursive: bool, images: bool) -> list[
                     if args.multithread:
                         to_hash.append(obj)
                     else:
-                        file_list.append(get_hash([obj])[0])
+                        file_list.append(get_hash(obj))
             else:
                 pb.set_description(f"Reading {src_dir}")
                 if args.multithread:
                     to_hash.append(obj)
                 else:
-                    file_list.append(get_hash([obj])[0])
+                    file_list.append(get_hash(obj))
 
     if args.multithread:
-        res = do_big_task(get_hash, [to_hash])
+        res = do_big_task(get_hash, to_hash)
 
-        return res[0]
+        return res
 
     return file_list
 
