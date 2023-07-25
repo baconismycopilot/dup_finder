@@ -1,8 +1,8 @@
 import argparse
+import hashlib
 import json
 import os
 from dataclasses import dataclass
-from hashlib import sha256
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 from typing import Callable
@@ -19,29 +19,39 @@ class FileSize:
     gb: int
 
 
-def get_hash(file_obj: Path) -> dict:
+def get_hash(file_obj: Path, alg: str | None = "sha256") -> dict:
     """
     Read a file bytes and generate a hash.
 
     :param file_obj: Path object
     :type file_obj: :class:`Path`
+    :param alg: Hash algorithm to use, refer to `hashlib` docs
+    :type alg: :class:`str`
 
-    :return: SHA256 hash
-    :rtype: :class:`list[dict]`
+    :return: :class:`dict` with :class:`Path` object and :class:`hash` object
+    :rtype: :class:`dict`
     """
 
     if not file_obj.is_file():
         pass
 
+    h = hashlib.new(alg)
+    pbar = tqdm(total=file_obj.stat().st_size, desc=f"Checking {file_obj.name}", leave=False)
     with open(file_obj, 'rb') as fb:
-        if args.quick:
-            b = fb.read(4096)
-        else:
-            b = fb.read()
+        if args.fast:
+            block = fb.read(4096)
+            h.update(block)
+            return {"file": file_obj, "hash": h.hexdigest()}
 
-        h = sha256(b).hexdigest()
+        block = fb.read(512)
+        while block:
+            h.update(block)
+            pbar.update(len(block))
+            block = fb.read(512)
 
-    return {"file": file_obj, "hash": h}
+    pbar.close()
+
+    return {"file": file_obj, "hash": h.hexdigest()}
 
 
 def read_dir(source_dir: Path, recursive: bool) -> list[Path]:
@@ -84,7 +94,8 @@ def is_image(f: Path) -> bool:
 
 
 def do_big_task(func_name: Callable, func_args: list):
-    """Use half of available CPUs to perform this task."""
+    """Take advantage of multiprocessing and use half
+    of the available cores to perform this task."""
 
     cpus = int(cpu_count() / 2)
 
@@ -94,6 +105,13 @@ def do_big_task(func_name: Callable, func_args: list):
     pool.join()
 
     return res
+
+
+def delete_duplicates(files: list[Path]) -> bool:
+    for file in tqdm(files, desc="Deleting duplicates..."):
+        file.unlink()
+
+    return True
 
 
 def build_file_list(src_dir: str | Path, recursive: bool, images: bool) -> list[dict]:
@@ -154,7 +172,7 @@ def clean_results(source_list: dict) -> dict:
 
 
 def find_duplicates(
-        src_list: str, target_list: str, recursive: bool, images: bool
+        src_list: str, target_list: str, recursive: bool, images: bool, delete: bool = False
 ) -> dict:
     """
     Find duplicates of files from `src_list` in `dup_list`.
@@ -166,6 +184,8 @@ def find_duplicates(
     :param recursive: Recurse into subdirectories
     :param images: Only search for image files
     :type images: :class:`bool`
+    :param delete: Delete duplicates in the target path
+    :type delete: :class:`bool`
 
     :return: Original ``dict`` of files with respective duplicates
     :rtype: :class:`dict`
@@ -186,13 +206,19 @@ def find_duplicates(
     }
 
     source_list_hashes = source_list.keys()
+    to_delete = []
 
     for target_file in tqdm(target_path, colour="yellow", desc="Identifying duplicates"):
         if target_file.get("hash") in source_list_hashes:
+            if delete:
+                to_delete.append(target_file.get("file"))
             t: Path = target_file.get("file")
             source_list[target_file.get("hash")]["duplicate"].append(t.absolute())
 
-    return clean_results(source_list)
+    results = clean_results(source_list)
+    delete_duplicates(to_delete)
+
+    return results
 
 
 def convert_size(size_in_bytes: int):
@@ -244,7 +270,7 @@ def parse_arguments():
         action="store_true",
     )
     parser.add_argument(
-        "-q", "--quick",
+        "-f", "--fast",
         help="Read a small portion of files, faster but potentially less accurate",
         default=False,
         action="store_true"
@@ -264,6 +290,12 @@ def parse_arguments():
         default=False,
         action="store_true",
     )
+    parser.add_argument(
+        "-d", "--delete",
+        help="Delete duplicates. This is irreversible. You will need to confirm.",
+        default=False,
+        action="store_true"
+    )
 
     return parser.parse_args()
 
@@ -271,11 +303,17 @@ def parse_arguments():
 if __name__ == "__main__":
     args = parse_arguments()
 
+    if args.delete:
+        confirm = input("This will delete duplicate files in the target path. Are you sure? (y|N)")
+        if not confirm.lower() in ['y', 'yes']:
+            raise RuntimeError(f"Operation cancelled by user. Delete answer was: {confirm}")
+
     duplicates = find_duplicates(
         src_list=args.source,
         target_list=args.target,
         recursive=args.recursive,
         images=args.images,
+        delete=args.delete
     )
 
     print_summary(data=duplicates)
