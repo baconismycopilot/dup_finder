@@ -8,7 +8,7 @@ options:
   -t TARGET, --target TARGET
                         Directory to search
   -r, --recursive       Recurse into subdirectories
-  -q, --quick           Read a small portion of files, faster but potentially less
+  -f, --fast            Read a small portion of files, faster but potentially less
                         accurate
   -i, --images          Only search for image files
   -m, --multithread     Use multiprocessing for large batches, defaults to half of
