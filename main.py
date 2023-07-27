@@ -32,12 +32,12 @@ def get_hash(file_obj: Path, alg: str | None = "sha256") -> dict:
     :rtype: :class:`dict`
     """
 
-    if not file_obj.is_file():
+    if file_obj.is_dir():
         pass
 
     h = hashlib.new(alg)
     pbar = tqdm(total=file_obj.stat().st_size, desc=f"Checking {file_obj.name}", leave=False)
-    with open(file_obj, 'rb') as fb:
+    with open(file_obj.absolute(), 'rb') as fb:
         if args.fast:
             block = fb.read(4096)
             h.update(block)
@@ -108,6 +108,7 @@ def do_big_task(func_name: Callable, func_args: list):
 
 
 def delete_duplicates(files: list[Path]) -> bool:
+    """Delete the files in the list."""
     for file in tqdm(files, desc="Deleting duplicates..."):
         file.unlink()
 
@@ -131,6 +132,10 @@ def build_file_list(src_dir: str | Path, recursive: bool, images: bool) -> list[
 
     to_hash = []
     file_list = []
+
+    if src_dir.is_file():
+        return [get_hash(src_dir)]
+
     dir_files = read_dir(src_dir, recursive=recursive)
 
     with tqdm(enumerate(dir_files), colour="#d3d3d3", total=len(dir_files)) as pb:
@@ -177,7 +182,7 @@ def find_duplicates(
     """
     Find duplicates of files from `src_list` in `dup_list`.
 
-    :param src_list: Directory of originals
+    :param src_list: File or path of originals
     :type src_list: :class:`str`
     :param target_list: Directory to search for duplicates
     :type: :class:`str`
@@ -200,7 +205,7 @@ def find_duplicates(
 
     source_list: dict = {
         k.get("hash"): {
-            "file": k.get("file"),
+            "file": k.get("file").absolute(),
             "size": os.stat(k.get("file")).st_size,
             "duplicate": []} for k in source_path
     }
@@ -254,7 +259,7 @@ def parse_arguments():
     parser.add_argument(
         "-s", "--source",
         type=str,
-        help="Directory of original files",
+        help="File or path of original files",
         required=True,
     )
     parser.add_argument(
@@ -276,7 +281,9 @@ def parse_arguments():
         action="store_true"
     )
     parser.add_argument(
-        "-i", "--images", help="Only search for image files", default=False, action="store_true"
+        "-i", "--images", help="Only search for image files",
+        default=False,
+        action="store_true"
     )
     parser.add_argument(
         "-m", "--multithread",
