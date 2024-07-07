@@ -86,15 +86,15 @@ class DuplicateFinder:
             else True
         )
 
+    def print_results(self) -> None:
+        print(json.dumps(self.results, indent=2, default=str))
+
     def print_summary(self):
         duplicate_counter = 0
         total_dup_size = 0
         for file_hash, file_details in self.results.items():
             duplicate_counter += len(file_details["duplicate"])
             total_dup_size += file_details["size"]
-
-        if duplicate_counter > 0:
-            print(json.dumps(self.results, indent=2, default=str))
 
         print(
             f"{len(self.results)} {'file' if len(self.results) < 2 else 'files'}, {duplicate_counter} duplicates (--print for details)"
@@ -115,21 +115,10 @@ class DuplicateFinder:
         if file_obj.is_dir():
             pass
 
-        h = hashlib.new(self.hash_algorithm)
-        file_stat = file_obj.stat()
-        pbar = tqdm(
-            total=file_stat.st_size,
-            desc=f"Checking {file_obj.name}",
-            leave=False,
-        )
+        h = hashlib.new(self.hash_algorithm, usedforsecurity=False)
         with open(file_obj, "rb") as fb:
-            block = fb.read()
-            while block:
+            while block := fb.read():
                 h.update(block)
-                pbar.update(len(block))
-                block = fb.read()
-
-        pbar.close()
 
         return {"file": file_obj, "hash": h.hexdigest()}
 
@@ -257,13 +246,13 @@ def run_with_args(runtime_args: argparse.Namespace):
 
     duplicate_finder.find_duplicates()
 
-    if runtime_args.print_summary:
-        duplicate_finder.print_summary()
+    if runtime_args.print_results:
+        duplicate_finder.print_results()
+
+    duplicate_finder.print_summary()
 
 
 def parse_arguments():
-    """Parse arguments and return the results."""
-
     parser = argparse.ArgumentParser(description="Find duplicate files")
     parser.set_defaults(func=run_with_args)
     parser.add_argument(
@@ -288,13 +277,6 @@ def parse_arguments():
         action="store_true",
     )
     parser.add_argument(
-        "-f",
-        "--fast",
-        help="Read a small portion of files, faster but potentially less accurate",
-        default=False,
-        action="store_true",
-    )
-    parser.add_argument(
         "-i",
         "--images",
         help="Only search for image files",
@@ -304,7 +286,7 @@ def parse_arguments():
     parser.add_argument(
         "-p",
         "--print",
-        dest="print_summary",
+        dest="print_results",
         help="Print results to stdout",
         default=False,
         action="store_true",
