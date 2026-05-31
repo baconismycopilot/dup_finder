@@ -1,0 +1,64 @@
+[project]
+name = "dup-finder"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.14"
+dependencies = [
+    "click>=8.3.1",
+    "click-aliases>=1.0.5",
+    "pyyaml>=6.0.3",
+    "tqdm>=4.67.3",
+]
+
+[dependency-groups]
+dev = [
+    "pip>=26.0.1",
+    "ruff>=0.15.1",
+]
+
+# Imported from ~repos/templates/pyproject/
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.ruff.lint]
+select = [
+  "E", #pycodestyle
+  "F", #pyfalkes
+  "W", #pycodestyle
+  "B", #bugbear
+  "I", #isort
+  "RUF", #ruff
+]
+
+ignore = [
+  "B905", # `zip()` without an explicit `strict=` parameter
+]
+
+fixable = [
+  "E", #pycodestyle
+  "F", #pyfalkes
+  "W", #pycodestyle
+  "B", #bugbear
+  "I", #isort
+  "RUF", #ruff
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.poe.tasks.format]
+args = [{ name = "files", positional = true, default = "." }]
+shell = """
+uv run ruff format ${files}
+uv run ruff check --fix ${files}
+"""
+
+# uv run poe flynt file1.py file2.py
+[tool.poe.tasks.flynt]
+args = [{ name = "files", positional = true }]
+shell = """
+uv run flynt -ll 99 --transform-concats --transform-joins --aggressive ${files}
+"""
