@@ -1,0 +1,28 @@
+[project]
+name = "dup-finder"
+version = "0.1.0"
+description = "Find duplicate files"
+requires-python = ">=3.13"
+dependencies = [
+    "click>=8.4.2",
+    "pyyaml>=6.0.3",
+    "tqdm==4.65.0",
+]
+
+[project.scripts]
+dup-finder = "dup_finder:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["dup_finder.py"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
