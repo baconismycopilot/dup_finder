@@ -28,6 +28,6 @@ clean-test: ## remove pytest artifacts
 	find . -name '.pytest_cache' -exec rm -rf {} +
 
 test: ## run tests
-	pytest tests/
+	uv run pytest tests/
 
 

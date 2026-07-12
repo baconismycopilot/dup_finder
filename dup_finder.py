@@ -1,395 +1,302 @@
-#!/usr/bin/env python3
-"""
-dupfinder - Terminal-native duplicate file finder with visual progress.
-Refactored to use Click for CLI handling and modular ETL pipeline functions.
-"""
-
-import csv
 import hashlib
-import json
-import sys
+import os
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 import click
+import yaml
+from tqdm import tqdm
 
-# --- Configuration ---
-CHUNK_SIZE = 65536
-FIRST_CHUNK_SIZE = 1024
+__all__ = ["DuplicateFinder"]
 
 
-class ProgressBar:
-    """Simple ANSI-based progress bar that updates in place."""
+@dataclass
+class FileSize:
+    kb: int
+    mb: int
+    gb: int
 
-    def __init__(self, total: int, label: str, width: int = 40) -> None:
-        self.total = total
-        self.current = 0
-        self.label = label
-        self.width = width
-        self.enabled = sys.stdout.isatty() and sys.stdout.encoding is not None
-        self._update_display()
 
-    def _update_display(self) -> None:
-        """Render the progress bar."""
-        if not self.enabled or self.total == 0:
-            return
+class DuplicateFinder:
+    # Files at or under this size are hashed once; the "partial" hash already
+    # covers the whole file, so no separate full-hash pass is needed for them.
+    PARTIAL_HASH_SIZE = 64 * 1024
 
-        percent = min(100.0, (self.current / self.total) * 100)
-        filled = int(self.width * (self.current / self.total))
-        bar = "=" * filled + "-" * (self.width - filled)
+    def __init__(
+        self,
+        source_path: Path,
+        target_path: Path,
+        hash_algorithm: str = "blake2b",
+        images_only: bool = False,
+        delete: bool = False,
+    ):
+        self.source_path = Path(source_path)
+        self.target_path = Path(target_path)
+        self.hash_algorithm = hash_algorithm
+        self.images_only = images_only
+        self.delete = delete
+        self.image_file_types = {"bmp", "jpg", "jpeg", "png", "gif", "pdf", "svg"}
+        self.results = {}
 
-        label = self.label[:15] if len(self.label) > 15 else self.label
-        output = f"\r{label:<16} [{bar}] {percent:5.1f}% ({self.current}/{self.total})"
+    @staticmethod
+    def _convert_size(size_in_bytes: int) -> FileSize:
+        size_kb = size_in_bytes / 1024
+        size_mb = size_kb / 1024
+        size_gb = size_mb / 1024
 
-        sys.stdout.write(output)
-        sys.stdout.flush()
+        return FileSize(round(size_kb), round(size_mb), round(size_gb))
 
-    def update(self, n: int = 1) -> None:
-        """Increment progress."""
-        self.current += n
-        if self.enabled:
-            self._update_display()
+    @staticmethod
+    def _clean_results(source_list: dict) -> dict:
+        """Remove items where no duplicates were found."""
+        return {k: v for k, v in source_list.items() if v.get("duplicate")}
 
-    def finish(self) -> None:
-        """Finalize and move to next line."""
-        if self.enabled:
-            sys.stdout.write("\r\033[K")
-            percent = 100.0
-            bar = "=" * self.width
-            label = self.label[:15] if len(self.label) > 15 else self.label
-            sys.stdout.write(
-                f"\r{label:<16} [{bar}] {percent:5.1f}% ({self.current}/{self.total})\n"
+    @staticmethod
+    def _delete_duplicates(files: list[Path]) -> bool:
+        """Delete the files in the list."""
+        for file in tqdm(files, desc="Deleting duplicates..."):
+            file.unlink()
+
+        return True
+
+    def _is_image(self, f: Path) -> bool:
+        """Low effort attempt to identify an image file."""
+
+        return f.suffix.lstrip(".").lower() in self.image_file_types
+
+    def summary(self) -> dict:
+        duplicate_counter = sum(len(v["duplicate"]) for v in self.results.values())
+        total_dup_size = sum(v["size"] for v in self.results.values())
+
+        return {
+            "files_with_duplicates": len(self.results),
+            "duplicate_count": duplicate_counter,
+            "duplicate_size_mb": self._convert_size(total_dup_size).mb,
+        }
+
+    def print_summary(self) -> None:
+        click.echo(yaml.safe_dump(self.summary(), sort_keys=False))
+
+    def print_results(self) -> None:
+        serializable = {
+            file_hash: {
+                "file": str(details["file"]),
+                "size": details["size"],
+                "duplicate": [str(p) for p in details["duplicate"]],
+            }
+            for file_hash, details in self.results.items()
+        }
+        click.echo(yaml.safe_dump(serializable, sort_keys=False, width=1000))
+
+    def _new_hash(self):
+        # A 32-byte digest is already far more collision-resistant than this
+        # use case needs, and keeps the resulting hex key under YAML's
+        # 128-character simple-key limit so results render as plain
+        # `key: value` mappings instead of the verbose `? key` / `: value`
+        # explicit-key form.
+        kwargs = {"digest_size": 32} if self.hash_algorithm.startswith("blake2") else {}
+        return hashlib.new(self.hash_algorithm, usedforsecurity=False, **kwargs)
+
+    def _partial_hash(self, file_obj: Path) -> str:
+        """Hash just the leading chunk of a file, to cheaply rule out mismatches."""
+
+        h = self._new_hash()
+        with open(file_obj, "rb") as fb:
+            h.update(fb.read(self.PARTIAL_HASH_SIZE))
+
+        return h.hexdigest()
+
+    def _full_hash(self, file_obj: Path) -> str:
+        """Hash the entire contents of a file, reading in fixed-size chunks."""
+
+        h = self._new_hash()
+        with open(file_obj, "rb") as fb:
+            while block := fb.read(1024 * 1024):
+                h.update(block)
+
+        return h.hexdigest()
+
+    def _walk(self, directory: Path):
+        """
+        Recursively yield (path, size) for every file under directory.
+
+        Uses os.scandir directly instead of Path.rglob + a separate os.stat
+        call, so each entry's type and size come from a single cached stat
+        result (one syscall per entry) rather than two.
+        """
+
+        with os.scandir(directory) as it:
+            for entry in it:
+                if entry.is_dir(follow_symlinks=False):
+                    yield from self._walk(Path(entry.path))
+                elif entry.is_file():
+                    path = Path(entry.path)
+                    if self.images_only and not self._is_image(path):
+                        continue
+                    yield path, entry.stat().st_size
+
+    def _build_file_list(self, src_dir: Path) -> list[dict]:
+        """Build a list of {file, size} entries for a directory, unhashed."""
+
+        if src_dir.is_file():
+            return [{"file": src_dir, "size": src_dir.stat().st_size}]
+
+        return [
+            {"file": path, "size": size}
+            for path, size in tqdm(
+                list(self._walk(src_dir)), colour="#d3d3d3", desc=f"Scanning {src_dir}"
             )
-            sys.stdout.flush()
-        else:
-            sys.stderr.write(f"{self.label}: Complete ({self.current}/{self.total})\n")
+        ]
 
+    def _compute_partial_hashes(self, files: list[dict], desc: str) -> list[dict]:
+        """Compute partial hashes for a list of candidate files, in parallel."""
 
-def get_hash(path: Path, full: bool = True) -> Optional[str]:
-    """Compute hash. Returns None on error."""
-    algo = hashlib.sha256()
-    try:
-        with open(path, "rb") as f:
-            if full:
-                while chunk := f.read(CHUNK_SIZE):
-                    algo.update(chunk)
-            else:
-                algo.update(f.read(FIRST_CHUNK_SIZE))
-        return algo.hexdigest()
-    except (OSError, IOError, PermissionError):
-        return None
+        def work(entry: dict) -> dict:
+            entry["partial_hash"] = self._partial_hash(entry["file"])
+            entry["is_complete"] = entry["size"] <= self.PARTIAL_HASH_SIZE
+            return entry
 
+        with ThreadPoolExecutor() as executor:
+            futures = [executor.submit(work, f) for f in files]
+            for _ in tqdm(
+                as_completed(futures), total=len(futures), colour="cyan", desc=desc
+            ):
+                pass
 
-def get_size(path: Path) -> int:
-    """Get file size. Returns -1 on error."""
-    try:
-        return path.stat().st_size
-    except (OSError, IOError):
-        return -1
+        return files
 
+    def _compute_full_hashes(self, files: list[dict]) -> None:
+        """Confirm candidates with a full-file hash, in parallel."""
 
-def collect_files(
-    root: Path, min_size: int, max_size: Optional[int], exclude_exts: set
-) -> List[Path]:
-    """Walk directory and filter files."""
-    total_count = sum(1 for p in root.rglob("*") if p.is_file())
+        def work(entry: dict) -> None:
+            entry["final_hash"] = self._full_hash(entry["file"])
 
-    pb = ProgressBar(total_count, "Scanning files")
-    files: List[Path] = []
+        with ThreadPoolExecutor() as executor:
+            futures = [executor.submit(work, f) for f in files]
+            for _ in tqdm(
+                as_completed(futures),
+                total=len(futures),
+                colour="yellow",
+                desc="Confirming duplicates",
+            ):
+                pass
 
-    for p in root.rglob("*"):
-        if not p.is_file():
-            pb.update()
-            continue
-        if p.name.startswith("."):
-            pb.update()
-            continue
-        if p.suffix.lower() in exclude_exts:
-            pb.update()
-            continue
+    def find_duplicates(self) -> None:
+        source_files = self._build_file_list(self.source_path)
+        target_files = self._build_file_list(self.target_path)
 
-        sz = get_size(p)
-        if sz < 0 or sz == 0:
-            pb.update()
-            continue
-        if sz < min_size:
-            pb.update()
-            continue
-        if max_size and sz > max_size:
-            pb.update()
-            continue
+        # A file can only have a duplicate on the other side if some file
+        # there shares its size, so files with a unique size never need to
+        # be read at all.
+        source_sizes = {f["size"] for f in source_files}
+        target_sizes = {f["size"] for f in target_files}
+        candidate_sizes = source_sizes & target_sizes
 
-        files.append(p)
-        pb.update()
+        source_candidates = [f for f in source_files if f["size"] in candidate_sizes]
+        target_candidates = [f for f in target_files if f["size"] in candidate_sizes]
 
-    pb.finish()
-    return files
+        source_candidates = self._compute_partial_hashes(
+            source_candidates, desc="Partial hashing source"
+        )
+        target_candidates = self._compute_partial_hashes(
+            target_candidates, desc="Partial hashing target"
+        )
 
+        source_by_partial = defaultdict(list)
+        for entry in source_candidates:
+            source_by_partial[(entry["size"], entry["partial_hash"])].append(entry)
 
-# --- ETL Pipeline Stages ---
+        target_by_partial = defaultdict(list)
+        for entry in target_candidates:
+            target_by_partial[(entry["size"], entry["partial_hash"])].append(entry)
 
-def stage_extract(
-    root: Path, min_size: int, max_size: Optional[int], exclude_exts: set
-) -> Tuple[List[Path], int]:
-    """
-    STAGE 1: EXTRACT
-    Collect all valid files from the directory tree.
-    Returns: (List of files, total count)
-    """
-    all_files = collect_files(root, min_size, max_size, exclude_exts)
-    return all_files, len(all_files)
+        confirm_keys = source_by_partial.keys() & target_by_partial.keys()
 
+        to_full_hash = []
+        for key in confirm_keys:
+            for entry in source_by_partial[key] + target_by_partial[key]:
+                if entry["is_complete"]:
+                    entry["final_hash"] = entry["partial_hash"]
+                else:
+                    to_full_hash.append(entry)
 
-def stage_transform_size(all_files: List[Path]) -> List[List[Path]]:
-    """
-    STAGE 2: TRANSFORM (Size)
-    Group files by size. Filter to keep only groups with 2+ files.
-    Returns: List of file lists (candidates)
-    """
-    size_map: dict[int, List[Path]] = defaultdict(list)
-    for f in all_files:
-        sz = get_size(f)
-        if sz > 0:
-            size_map[sz].append(f)
+        if to_full_hash:
+            self._compute_full_hashes(to_full_hash)
 
-    size_candidates = [flist for flist in size_map.values() if len(flist) >= 2]
-    return size_candidates
+        results = {}
+        for key in confirm_keys:
+            for entry in source_by_partial[key]:
+                results.setdefault(
+                    entry["final_hash"],
+                    {
+                        "file": entry["file"].absolute(),
+                        "size": entry["size"],
+                        "duplicate": [],
+                    },
+                )
 
+        to_delete = []
+        for key in confirm_keys:
+            for entry in target_by_partial[key]:
+                match = results.get(entry["final_hash"])
+                if match is None:
+                    continue
 
-def stage_transform_partial_hash(
-    candidates: List[List[Path]], workers: int
-) -> List[List[Path]]:
-    """
-    STAGE 3: TRANSFORM (Partial Hash)
-    Hash first 1KB of candidates. Filter to keep only groups with 2+ matches.
-    Returns: List of file lists (candidates)
-    """
-    flat_candidates = [f for flist in candidates for f in flist]
-    pb = ProgressBar(len(flat_candidates), "Partial Hashing (1KB)")
-    partial_map: dict[str, List[Path]] = defaultdict(list)
+                file: Path = entry["file"]
+                match["duplicate"].append(file.absolute())
+                if self.delete:
+                    to_delete.append(file)
 
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(get_hash, f, False): f for f in flat_candidates}
-        for fut in as_completed(futures):
-            h = fut.result()
-            if h:
-                f = futures[fut]
-                partial_map[h].append(f)
-            pb.update()
-    pb.finish()
+        self.results = self._clean_results(results)
 
-    partial_candidates = [flist for flist in partial_map.values() if len(flist) >= 2]
-    return partial_candidates
-
-
-def stage_transform_full_hash(
-    candidates: List[List[Path]], workers: int
-) -> dict[str, List[str]]:
-    """
-    STAGE 4: TRANSFORM (Full Hash)
-    Hash full content of candidates.
-    Returns: Dictionary mapping hash to list of file paths.
-    """
-    flat_candidates = [f for flist in candidates for f in flist]
-    pb = ProgressBar(len(flat_candidates), "Full Hashing")
-    full_map: dict[str, List[str]] = defaultdict(list)
-
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(get_hash, f, True): f for f in flat_candidates}
-        for fut in as_completed(futures):
-            h = fut.result()
-            if h:
-                f = futures[fut]
-                full_map[h].append(str(f))
-            pb.update()
-    pb.finish()
-
-    return full_map
-
-
-def stage_load(full_map: dict[str, List[str]]) -> List[Tuple[str, List[str]]]:
-    """
-    STAGE 5: LOAD
-    Aggregate final groups and sort by wasted space (descending).
-    Returns: List of (hash, paths) tuples.
-    """
-    results: List[Tuple[str, List[str]]] = []
-    for _h, paths in full_map.items():
-        if len(paths) >= 2:
-            results.append((_h, sorted(paths)))
-
-    results.sort(key=lambda x: (-len(x[1]), x[0]))
-    return results
-
-
-def find_duplicates(
-    root: Path,
-    min_size: int,
-    max_size: Optional[int],
-    exclude_exts: set,
-    workers: int,
-) -> Tuple[List[Tuple[str, List[str]]], int]:
-    """
-    Orchestrate the ETL pipeline to find duplicates.
-    """
-    # Stage 1: Extract
-    all_files, total_scanned = stage_extract(root, min_size, max_size, exclude_exts)
-    if total_scanned < 2:
-        return [], total_scanned
-
-    # Stage 2: Transform (Size)
-    size_candidates = stage_transform_size(all_files)
-    if not size_candidates:
-        return [], total_scanned
-
-    # Stage 3: Transform (Partial Hash)
-    partial_candidates = stage_transform_partial_hash(size_candidates, workers)
-    if not partial_candidates:
-        return [], total_scanned
-
-    # Stage 4: Transform (Full Hash)
-    full_map = stage_transform_full_hash(partial_candidates, workers)
-
-    # Stage 5: Load
-    results = stage_load(full_map)
-
-    return results, total_scanned
-
-
-def print_stats(
-    start_time: float,
-    total_files: int,
-    dup_groups: int,
-    dup_files: int,
-    wasted: int,
-) -> None:
-    """Print summary to stderr."""
-    end_time = datetime.now().timestamp()
-    duration = end_time - start_time
-
-    click.echo("\nSCAN COMPLETE", err=True)
-    click.echo(f"Time: {duration:.2f}s", err=True)
-    click.echo(f"Files Scanned: {total_files}", err=True)
-    click.echo(f"Duplicate Groups: {dup_groups}", err=True)
-    click.echo(f"Duplicate Files: {dup_files}", err=True)
-    click.echo(f"Wasted Space: {wasted} bytes", err=True)
-
-
-def output_console(groups: List[Tuple[str, List[str]]]) -> None:
-    """Human readable output to stdout."""
-    if not groups:
-        click.echo("No duplicates found.")
-        return
-
-    click.echo(f"Found {len(groups)} duplicate groups:")
-    for i, (h, paths) in enumerate(groups, 1):
-        click.echo(f"\nGroup {i} ({len(paths)} files, hash: {h[:16]}...)")
-        for p in paths:
-            click.echo(f"  {p}")
-
-
-def output_json(groups: List[Tuple[str, List[str]]], out_path: Path) -> None:
-    """JSON output."""
-    data = {
-        "groups": [{"hash": h, "files": paths} for h, paths in groups]
-    }
-    with open(out_path, "w") as f:
-        json.dump(data, f, indent=2)
-    click.echo(f"JSON report saved to: {out_path}", err=True)
-
-
-def output_csv(groups: List[Tuple[str, List[str]]], out_path: Path) -> None:
-    """CSV output."""
-    with open(out_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["Group_ID", "Hash", "FilePath"])
-        for i, (h, paths) in enumerate(groups, 1):
-            for p in paths:
-                writer.writerow([i, h, p])
-    click.echo(f"CSV report saved to: {out_path}", err=True)
+        if self.delete:
+            click.echo("Deleting duplicates...")
+            self._delete_duplicates(to_delete)
 
 
 @click.command()
-@click.argument(
-    "path", type=click.Path(exists=True, file_okay=False, dir_okay=True, readable=True)
-)
-@click.option("-m", "--min-size", type=int, default=0, help="Min file size in bytes")
-@click.option("-M", "--max-size", type=int, default=None, help="Max file size in bytes")
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.argument("target", type=click.Path(exists=True, path_type=Path))
 @click.option(
-    "-e",
-    "--exclude",
-    type=str,
-    default="",
-    help="Comma-separated extensions (e.g. .tmp,.log)",
+    "-i",
+    "--images",
+    "images_only",
+    is_flag=True,
+    help="Only search for image files.",
 )
-@click.option("-j", "--jobs", type=int, default=4, help="Parallel workers")
-@click.option("-o", "--output", type=click.Path(), default=None, help="Output file path")
 @click.option(
-    "--format",
-    type=click.Choice(["console", "json", "csv"]),
-    default="console",
-    help="Output format",
+    "-d",
+    "--delete",
+    is_flag=True,
+    help="Delete duplicates found in TARGET. Confirmation required.",
 )
-@click.option("-v", "--verbose", is_flag=True, help="Show stats on stderr")
-@click.version_option(version="1.0.0", prog_name="dupfinder")
-def main(
-    path: str,
-    min_size: int,
-    max_size: Optional[int],
-    exclude: str,
-    jobs: int,
-    output: Optional[str],
-    format: str,
-    verbose: bool,
-) -> None:
+def main(source: Path, target: Path, images_only: bool, delete: bool) -> None:
     """
-    Find duplicate files in a directory.
+    Find files in TARGET that duplicate files in SOURCE.
 
-    PATH: The directory to scan.
+    SOURCE and TARGET may each be a single file or a directory, and
+    directories are always searched recursively.
     """
-    root = Path(path).resolve()
-    exclude_exts = set(e.strip().lstrip(".") for e in exclude.split(",") if e.strip())
 
-    start_time = datetime.now().timestamp()
-    groups, total_scanned = find_duplicates(
-        root, min_size, max_size, exclude_exts, jobs
+    if delete:
+        click.confirm(
+            "This will delete duplicate files in the target path. Are you sure?",
+            abort=True,
+        )
+
+    duplicate_finder = DuplicateFinder(
+        source_path=source,
+        target_path=target,
+        images_only=images_only,
+        delete=delete,
     )
+    duplicate_finder.find_duplicates()
 
-    dup_groups = len(groups)
-    dup_files = sum(len(g[1]) for g in groups)
-    wasted = 0
-
-    # Calculate wasted space
-    if groups:
-        for _h, paths in groups:
-            if paths:
-                try:
-                    sz = get_size(Path(paths[0]))
-                    if sz > 0:
-                        wasted += sz * (len(paths) - 1)
-                except Exception:
-                    pass
-
-    if verbose:
-        print_stats(start_time, total_scanned, dup_groups, dup_files, wasted)
-
-    if format == "console":
-        output_console(groups)
-    elif format == "json":
-        if not output:
-            click.echo("Error: --output required for JSON format", err=True)
-            sys.exit(2)
-        output_json(groups, Path(output))
-    elif format == "csv":
-        if not output:
-            click.echo("Error: --output required for CSV format", err=True)
-            sys.exit(2)
-        output_csv(groups, Path(output))
-
-    sys.exit(0 if dup_groups == 0 else 1)
+    duplicate_finder.print_results()
+    click.echo("---")
+    duplicate_finder.print_summary()
 
 
 if __name__ == "__main__":

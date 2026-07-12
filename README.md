@@ -1,52 +1,69 @@
-# dupfinder
+# Find duplicate files
 
-**Terminal-native duplicate file finder with visual progress and ETL-style architecture.**
+## Description
 
-`dupfinder` is a high-performance Python utility designed to scan directories for duplicate files. It utilizes a multi-stage filtering pipeline (Size → Partial Hash → Full Hash) combined with parallel processing to maximize speed while minimizing disk I/O.
+Find duplicate files and optionally delete duplicates.
 
-Built with a "real engineer" mindset, it features:
-- **Modern Tooling**: Managed entirely with `uv` for instant installs and reproducible environments.
-- **Zero Bloat**: Minimal dependencies (`click`).
-- **Visual Feedback**: Real-time ANSI progress bars for every stage of the scan.
-- **Pipeline Architecture**: Modular ETL (Extract, Transform, Load) design for clarity and testability.
-- **Scriptable**: Clean exit codes and machine-readable output formats (JSON/CSV) for CI/CD integration.
 
-## Features
+## Setup
 
-### 🚀 Performance Optimizations
-- **Multi-Stage Filtering**:
-  1.  **Size Grouping**: Instantly eliminates files with unique sizes.
-  2.  **Partial Hashing**: Compares only the first 1KB of remaining candidates.
-  3.  **Full Hashing**: Only computes full SHA-256 hashes for files that match both size and partial hash.
-- **Parallel Processing**: Uses `ThreadPoolExecutor` to hash multiple files simultaneously.
-- **Smart Caching**: Efficient memory usage via `defaultdict` and generator-based file walking.
+Requires Python 3.13+ and [uv](https://docs.astral.sh/uv/).
 
-### 🎨 User Experience
-- **Real-time Progress Bars**: Visual feedback for scanning, partial hashing, and full hashing stages.
-- **Graceful Degradation**: Automatically disables progress bars when output is piped.
-- **Colored Output**: Leverages `click` for clean, formatted terminal output.
+```shell
+uv sync
+```
 
-### 🛠️ Capabilities
-- **Flexible Filtering**:
-  - Minimum/Maximum file size constraints.
-  - Exclude specific file extensions (e.g., `.log`, `.tmp`).
-  - Ignore hidden files (dotfiles).
-- **Multiple Output Formats**:
-  - **Console**: Human-readable summary and file lists.
-  - **JSON**: Structured data for programmatic analysis.
-  - **CSV**: Spreadsheet-ready format for reporting.
-- **Wasted Space Calculation**: Estimates total storage wasted by duplicates.
+## Usage
 
-## Installation & Setup
+Run via `uv run`:
 
-We use **`uv`**, the extremely fast Python package installer and resolver, to manage the project environment.
+```shell
+uv run dup-finder SOURCE TARGET
+```
 
-### Prerequisites
-- Python 3.10+
-- `uv` installed (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
+`SOURCE` and `TARGET` may each be a single file or a directory; directories
+are always searched recursively. Results (which files in `TARGET` duplicate
+files in `SOURCE`) and a summary are always printed to stdout as YAML.
 
-### Project Setup
+```text
+Usage: dup-finder [OPTIONS] SOURCE TARGET
 
-1. **Initialize the project** (creates `pyproject.toml` and virtual environment):
-   ```bash
-   uv init
+  Find files in TARGET that duplicate files in SOURCE.
+
+  SOURCE and TARGET may each be a single file or a directory, and directories
+  are always searched recursively.
+
+Options:
+  -i, --images  Only search for image files.
+  -d, --delete  Delete duplicates found in TARGET. Confirmation required.
+  --help        Show this message and exit.
+```
+
+## Examples
+
+### Find duplicate files
+
+```shell
+uv run dup-finder ~/Pictures/originals ~/Downloads
+```
+
+### Only compare images, and delete confirmed duplicates in TARGET
+
+```shell
+uv run dup-finder --images --delete ~/Pictures/originals ~/Downloads
+```
+
+## Development
+
+Run the test suite with:
+
+```shell
+make test
+```
+
+or directly:
+
+```shell
+uv run pytest tests/
+```
+
